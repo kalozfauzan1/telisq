@@ -1,0 +1,22 @@
+[package]
+name = "mcp"
+version = "1.0.0"
+edition = "2021"
+description = "Telisq Multi-Context Protocol (MCP) implementation"
+license = "MIT"
+
+[dependencies]
+# Standard library
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+thiserror = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+tracing = "0.1"
+
+# Telisq crates
+shared = { path = "../shared" }
+
+[dev-dependencies]
+tokio-test = "0.4"
+insta = "1.34"

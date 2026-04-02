@@ -1,0 +1,40 @@
+[package]
+name = "shared"
+version = "1.0.0"
+edition = "2021"
+description = "Telisq shared domain contracts and utilities"
+license = "MIT"
+
+[dependencies]
+# Workspace dependencies
+serde = { workspace = true, features = ["derive"] }
+serde_yaml = { workspace = true }
+serde_json = "1.0"
+toml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+tempfile = { workspace = true }
+walkdir = { workspace = true }
+lazy_static = { workspace = true }
+regex = { workspace = true }
+color-eyre = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }
+pathdiff = { workspace = true }
+uuid = { workspace = true }
+once_cell = { workspace = true }
+tap = { workspace = true }
+
+# Other dependencies
+serde_with = "3.4"
+normalize-line-endings = "0.3"
+home = "0.5"
+
+[dev-dependencies]
+# Workspace dependencies
+assert-json-diff = { workspace = true }
+mockall = { workspace = true }
+rstest = { workspace = true }
+test-log = { workspace = true }

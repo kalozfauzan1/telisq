@@ -1,0 +1,37 @@
+[package]
+name = "telisq_core"
+version = "1.0.0"
+edition = "2021"
+description = "Telisq core engine with LLM integration and agent orchestration"
+license = "MIT"
+
+[lib]
+name = "telisq_core"
+path = "src/lib.rs"
+
+[dependencies]
+# Standard library
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+thiserror = "1.0"
+reqwest = { version = "0.11", features = ["json", "stream"] }
+tracing = "0.1"
+async-trait = "0.1"
+futures = "0.3"
+futures-util = "0.3"
+sqlx = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# Telisq crates
+shared = { path = "../shared" }
+mcp = { path = "../mcp" }
+index = { path = "../index", package = "telisq_index" }
+plan = { path = "../plan", package = "telisq-plan" }
+
+[dev-dependencies]
+tokio-test = "0.4"
+wiremock = "0.6"
+tempfile = "3.8"
+tempdir = "0.3"

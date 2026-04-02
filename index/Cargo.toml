@@ -1,0 +1,18 @@
+[package]
+name = "telisq_index"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Index crate for Ollama embeddings and Qdrant vector search"
+
+[dependencies]
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+walkdir = { workspace = true }
+notify = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }

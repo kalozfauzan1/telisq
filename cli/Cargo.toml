@@ -1,0 +1,36 @@
+[package]
+name = "telisq-cli"
+version = "1.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "telisq"
+path = "src/main.rs"
+
+[dependencies]
+telisq_core = { path = "../core", package = "telisq_core" }
+telisq-plan = { path = "../plan" }
+telisq-index = { path = "../index", package = "telisq_index" }
+shared = { path = "../shared" }
+mcp = { path = "../mcp" }
+
+tokio = { version = "1.35.0", features = ["full"] }
+clap = { version = "4.5.1", features = ["derive"] }
+ratatui = "0.26.2"
+crossterm = "0.27.0"
+serde = { version = "1.0.197", features = ["derive"] }
+serde_json = "1.0.114"
+rusqlite = "0.31.0"
+thiserror = "1.0.50"
+anyhow = "1.0.82"
+owo-colors = "3.5.0"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+dirs = "5.0.0"
+sqlx = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.11", features = ["json"] }
+
+[dev-dependencies]
+tempfile = "3.10.0"

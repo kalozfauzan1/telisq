@@ -1,0 +1,44 @@
+[package]
+name = "telisq-plan"
+version = "1.0.0"
+edition = "2021"
+description = "Telisq plan parser and execution tracker"
+license = "MIT"
+
+[dependencies]
+# Workspace dependencies
+serde = { workspace = true, features = ["derive"] }
+serde_yaml = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+tempfile = { workspace = true }
+walkdir = { workspace = true }
+lazy_static = { workspace = true }
+regex = { workspace = true }
+color-eyre = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }
+pathdiff = { workspace = true }
+uuid = { workspace = true }
+once_cell = { workspace = true }
+tap = { workspace = true }
+
+# Local dependencies
+shared = { path = "../shared" }
+
+# Other dependencies
+itertools = "0.13"
+petgraph = { version = "0.6", features = ["serde-1"] }
+
+[dev-dependencies]
+# Workspace dependencies
+assert-json-diff = { workspace = true }
+mockall = { workspace = true }
+rstest = { workspace = true }
+test-log = { workspace = true }
+
+# Local dev dependencies
+shared = { path = "../shared" }
