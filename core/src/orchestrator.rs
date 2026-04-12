@@ -1363,14 +1363,28 @@ impl Orchestrator {
     /// Gracefully shuts down the orchestrator.
     pub async fn shutdown(&self) -> Result<()> {
         info!("Shutting down orchestrator...");
-        // TODO: Implement shutdown logic
+        self.stop_session().await;
+        info!("Orchestrator shutdown complete");
         Ok(())
     }
 }
 
 impl Drop for Orchestrator {
     fn drop(&mut self) {
-        // TODO: Cleanup resources on drop
+        let has_incomplete = {
+            let tasks = self.tasks.lock().unwrap();
+            tasks.values().any(|t| {
+                t.spec.status != TaskStatus::Completed
+                    && t.spec.status != TaskStatus::Failed
+                    && t.spec.status != TaskStatus::Skipped
+            })
+        };
+        if has_incomplete {
+            warn!(
+                session_id = %self.session_id,
+                "Orchestrator dropped with incomplete tasks - session may be lost"
+            );
+        }
     }
 }
 

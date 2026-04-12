@@ -1,4 +1,7 @@
-use crate::tui::app::AppState;
+// Copyright 2026 Your Name.
+// SPDX-License-Identifier: MIT
+
+use crate::tui::app::{AppState, ChatRole};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
@@ -8,6 +11,13 @@ use shared::types::TaskStatus;
 /// Renders the sidebar component with session information.
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let mut items: Vec<ListItem> = Vec::new();
+
+    // Title based on mode
+    let title = if state.session_status == "Dashboard" {
+        " Dashboard"
+    } else {
+        " Session"
+    };
 
     // Session ID
     let session_text = state
@@ -22,6 +32,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         "Running" => Color::Green,
         "Completed" => Color::Blue,
         "Stopped" => Color::Red,
+        "Dashboard" => Color::Cyan,
         "Idle" => Color::Yellow,
         _ => Color::White,
     };
@@ -61,13 +72,29 @@ pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
         );
     }
 
+    // Plan path if available
+    if let Some(plan) = &state.plan_path {
+        items.push(ListItem::new(""));
+        items.push(
+            ListItem::new(format!("Plan: {}", plan))
+                .style(Style::default().fg(Color::DarkGray)),
+        );
+    }
+
     // Quit confirmation
     if state.quit_confirm {
         items.push(ListItem::new(""));
         items.push(ListItem::new("Press 'q' again to quit").style(Style::default().fg(Color::Red)));
     }
 
-    let block = Block::default().borders(Borders::ALL).title(" Session");
+    // Dashboard hint
+    if state.session_status == "Dashboard" {
+        items.push(ListItem::new(""));
+        items.push(ListItem::new("Type ':' or '/' to start").style(Style::default().fg(Color::DarkGray)));
+        items.push(ListItem::new("Type 'help' for commands").style(Style::default().fg(Color::DarkGray)));
+    }
+
+    let block = Block::default().borders(Borders::ALL).title(title);
 
     let list = List::new(items).block(block);
     frame.render_widget(list, area);

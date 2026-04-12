@@ -1,3 +1,6 @@
+// Copyright 2026 Your Name.
+// SPDX-License-Identifier: MIT
+
 use clap::Parser;
 
 pub mod doctor;
@@ -14,7 +17,7 @@ pub mod status;
 #[command(long_about = Some("Telisq orchestrates AI agents to deliver software incrementally, following executable plans with tooling integration."))]
 pub struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Parser)]
@@ -38,15 +41,28 @@ pub enum Commands {
 impl Cli {
     pub fn run(self) -> anyhow::Result<()> {
         match self.command {
-            Commands::Plan(cmd) => cmd.run(),
-            Commands::Run(cmd) => cmd.run(),
-            Commands::Index(cmd) => cmd.run(),
-            Commands::Status(cmd) => cmd.run(),
-            Commands::Session(cmd) => cmd.run(),
-            Commands::Doctor(cmd) => cmd.run(),
-            Commands::Bootstrap => bootstrap(),
+            Some(Commands::Plan(cmd)) => cmd.run(),
+            Some(Commands::Run(cmd)) => cmd.run(),
+            Some(Commands::Index(cmd)) => cmd.run(),
+            Some(Commands::Status(cmd)) => cmd.run(),
+            Some(Commands::Session(cmd)) => cmd.run(),
+            Some(Commands::Doctor(cmd)) => cmd.run(),
+            Some(Commands::Bootstrap) => bootstrap(),
+            None => start_dashboard(),
         }
     }
+}
+
+/// Starts the TUI dashboard when no subcommand is provided.
+fn start_dashboard() -> anyhow::Result<()> {
+    use crate::tui::app::App;
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let mut app = App::new()?;
+        app.state.session_status = "Dashboard".to_string();
+        app.run().await
+    })
 }
 
 fn bootstrap() -> anyhow::Result<()> {

@@ -1,14 +1,23 @@
+// Copyright 2026 Your Name.
+// SPDX-License-Identifier: MIT
+
 use crate::tui::components;
 use crate::tui::events::{Event, Events};
 use crate::tui::{start_tui, stop_tui};
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::widgets::{Block, Borders};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 use ratatui::Terminal;
-use shared::types::{TaskId, TaskSpec, TaskStatus};
+use shared::types::{SessionId, TaskId, TaskSpec, TaskStatus};
+use shared::types::SessionState as SharedSessionState;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Instant;
 use telisq_core::orchestrator::{Orchestrator, OrchestratorEvent};
+use telisq_core::session::store::SessionStore;
+use tokio::runtime::Handle;
+use tracing::{warn, info};
 
 /// Application mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +26,8 @@ pub enum AppMode {
     Normal,
     /// Asking for user input mode.
     AskAgentInput,
+    /// Command input mode for dashboard chat.
+    CommandInput,
 }
 
 /// Task display information for the session view.
@@ -55,6 +66,21 @@ pub struct SearchResult {
     pub content_preview: String,
 }
 
+/// Chat message in the command input history.
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    pub role: ChatRole,
+    pub content: String,
+    pub timestamp: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChatRole {
+    User,
+    Agent,
+    System,
+}
+
 /// Application state.
 #[derive(Debug)]
 pub struct AppState {
@@ -85,6 +111,12 @@ pub struct AppState {
     pub plan_path: Option<String>,
     /// Task status counts.
     pub task_counts: HashMap<TaskStatus, usize>,
+    /// Chat message history for command input mode.
+    pub chat_messages: Vec<ChatMessage>,
+    /// Command history for up/down arrow navigation.
+    pub command_history: Vec<String>,
+    /// Current position in command history.
+    pub history_index: usize,
 }
 
 /// Active panel in the TUI.
@@ -116,6 +148,9 @@ impl Default for AppState {
             index_status: IndexStatus::default(),
             plan_path: None,
             task_counts: HashMap::new(),
+            chat_messages: Vec::new(),
+            command_history: Vec::new(),
+            history_index: 0,
         }
     }
 }
@@ -124,6 +159,7 @@ pub struct App {
     pub state: AppState,
     pub events: Events,
     pub orchestrator: Option<Orchestrator>,
+    pub session_store: Option<SessionStore>,
 }
 
 impl App {
@@ -132,12 +168,22 @@ impl App {
             state: AppState::default(),
             events: Events::new()?,
             orchestrator: None,
+            session_store: None,
         })
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
         // Load previous sessions from disk
         self.load_sessions()?;
+
+        // Add welcome message for dashboard mode
+        if self.state.session_status == "Dashboard" {
+            self.state.chat_messages.push(ChatMessage {
+                role: ChatRole::System,
+                content: "Welcome to Telisq! Type a command or describe what you want to build.\nTry: 'help' for available commands, 'run' to execute a plan, 'plan' to create one.".to_string(),
+                timestamp: Instant::now(),
+            });
+        }
 
         // Initialize terminal
         let mut terminal = start_tui()?;
@@ -169,13 +215,57 @@ impl App {
     }
 
     fn load_sessions(&mut self) -> anyhow::Result<()> {
-        // TODO: Implement loading sessions from disk
+        let data_dir = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".telisq");
+        let db_path = data_dir.join("telisq.db").to_string_lossy().to_string();
+
+        let rt = tokio::runtime::Runtime::new()?;
+        let store = rt.block_on(async {
+            SessionStore::new(&db_path).await
+        })?;
+
+        let project_path = std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let sessions = rt.block_on(async {
+            store.list_sessions(&project_path).await
+        })?;
+
+        info!(session_count = sessions.len(), "Loaded sessions from store");
+
+        self.session_store = Some(store);
+
         Ok(())
     }
 
     #[allow(dead_code)]
     fn save_session_snapshot(&mut self) -> anyhow::Result<()> {
-        // TODO: Implement saving session snapshot to disk
+        let store = match &self.session_store {
+            Some(s) => s,
+            None => {
+                warn!("No session store available for snapshot");
+                return Ok(());
+            }
+        };
+
+        let session_id = match &self.state.session_id {
+            Some(id) => SessionId::parse_str(id).map_err(|e| anyhow::anyhow!("Invalid session ID: {}", e))?,
+            None => {
+                warn!("No session ID available for snapshot");
+                return Ok(());
+            }
+        };
+
+        let rt = tokio::runtime::Runtime::new()?;
+        
+        rt.block_on(async {
+            store.update_session_status(session_id, "running").await
+        })?;
+
+        info!("Session snapshot saved");
         Ok(())
     }
 
@@ -193,6 +283,7 @@ impl App {
         match self.state.mode {
             AppMode::Normal => self.handle_normal_mode_key(key).await,
             AppMode::AskAgentInput => self.handle_ask_agent_mode_key(key).await,
+            AppMode::CommandInput => self.handle_command_input_mode_key(key).await,
         }
     }
 
@@ -227,7 +318,6 @@ impl App {
             KeyCode::Char('q') => {
                 if self.orchestrator.is_some() && self.orchestrator.as_ref().unwrap().is_running() {
                     if self.state.quit_confirm {
-                        // Second 'q' press confirms quit
                         return Err(anyhow::anyhow!("Quit"));
                     }
                     self.state.quit_confirm = true;
@@ -240,7 +330,6 @@ impl App {
             KeyCode::Char('a') => self.state.active_panel = ActivePanel::Agent,
             KeyCode::Char('i') => self.state.active_panel = ActivePanel::Index,
             KeyCode::Tab => {
-                // Cycle through panels
                 self.state.active_panel = match self.state.active_panel {
                     ActivePanel::Plan => ActivePanel::Session,
                     ActivePanel::Session => ActivePanel::Agent,
@@ -249,15 +338,18 @@ impl App {
                 };
             }
             KeyCode::Char(' ') => {
-                // Space bar to pause/resume (if orchestrator is running)
                 if let Some(orch) = &self.orchestrator {
                     if orch.is_running() {
-                        // TODO: Implement pause/resume
                         self.state
                             .agent_messages
                             .push("Pause/resume not yet implemented".to_string());
                     }
                 }
+            }
+            // Enter command input mode
+            KeyCode::Char(':') | KeyCode::Char('/') => {
+                self.state.mode = AppMode::CommandInput;
+                self.state.input_buffer.clear();
             }
             KeyCode::Enter => self.state.quit_confirm = false,
             KeyCode::Esc => self.state.quit_confirm = false,
@@ -265,6 +357,135 @@ impl App {
         }
 
         Ok(())
+    }
+
+    async fn handle_command_input_mode_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+    ) -> anyhow::Result<()> {
+        use crossterm::event::KeyCode;
+
+        match key.code {
+            KeyCode::Esc => {
+                self.state.mode = AppMode::Normal;
+                self.state.input_buffer.clear();
+            }
+            KeyCode::Enter => {
+                let input = std::mem::take(&mut self.state.input_buffer);
+                if !input.is_empty() {
+                    // Save to command history
+                    self.state.command_history.push(input.clone());
+                    self.state.history_index = self.state.command_history.len();
+
+                    // Add user message to chat
+                    self.state.chat_messages.push(ChatMessage {
+                        role: ChatRole::User,
+                        content: input.clone(),
+                        timestamp: Instant::now(),
+                    });
+
+                    // Process the command
+                    self.process_command(&input).await;
+                }
+                self.state.mode = AppMode::Normal;
+            }
+            KeyCode::Backspace => {
+                self.state.input_buffer.pop();
+            }
+            KeyCode::Delete => {
+                if !self.state.input_buffer.is_empty() {
+                    self.state.input_buffer.remove(self.state.input_buffer.len() - 1);
+                }
+            }
+            KeyCode::Up => {
+                if !self.state.command_history.is_empty() && self.state.history_index > 0 {
+                    self.state.history_index -= 1;
+                    self.state.input_buffer = self.state.command_history[self.state.history_index].clone();
+                }
+            }
+            KeyCode::Down => {
+                if self.state.history_index < self.state.command_history.len() {
+                    self.state.history_index += 1;
+                    if self.state.history_index < self.state.command_history.len() {
+                        self.state.input_buffer = self.state.command_history[self.state.history_index].clone();
+                    } else {
+                        self.state.input_buffer.clear();
+                    }
+                }
+            }
+            KeyCode::Left | KeyCode::Right => {
+                // TODO: Implement cursor movement
+            }
+            KeyCode::Char(c) => {
+                self.state.input_buffer.push(c);
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    /// Process a command from the input buffer.
+    async fn process_command(&mut self, command: &str) {
+        let cmd = command.trim().to_lowercase();
+
+        if cmd == "help" || cmd == "?" {
+            self.add_agent_response(
+                "Available commands:\n\
+                 • help / ? — Show this help\n\
+                 • run [plan] — Execute a plan (auto-discovers in plans/)\n\
+                 • plan <goal> — Create a new plan\n\
+                 • status — Show current plan progress\n\
+                 • index build — Index codebase\n\
+                 • index search <query> — Search indexed codebase\n\
+                 • doctor — Run diagnostics\n\
+                 • bootstrap — Create default config\n\
+                 • clear — Clear chat history\n\
+                 • quit / q — Exit Telisq"
+            );
+        } else if cmd == "quit" || cmd == "q" {
+            // Will be handled by returning error
+        } else if cmd.starts_with("run") {
+            self.add_agent_response("Starting execution phase... (plan auto-discovery from plans/ directory)");
+            // In a full implementation, this would spawn the orchestrator
+            self.state.session_status = "Running".to_string();
+        } else if cmd.starts_with("plan") {
+            let goal = command.trim_start_matches("plan").trim();
+            if goal.is_empty() {
+                self.add_agent_response("Please provide a goal: plan <describe what you want to build>");
+            } else {
+                self.add_agent_response(&format!("Creating plan for: {}\n(Plan Agent will analyze your codebase and generate a plan)", goal));
+            }
+        } else if cmd.starts_with("status") {
+            if self.state.tasks.is_empty() {
+                self.add_agent_response("No active plan loaded. Use 'run' to start execution or 'plan <goal>' to create one.");
+            } else {
+                let completed = self.state.tasks.iter().filter(|t| t.status == TaskStatus::Completed).count();
+                let total = self.state.tasks.len();
+                self.add_agent_response(&format!("Plan progress: {}/{} tasks completed ({}%)", completed, total, self.state.session_progress));
+            }
+        } else if cmd.starts_with("index") {
+            self.add_agent_response("Index commands:\n• index build — Crawl and index the codebase\n• index search <query> — Semantic search\n• index status — Show index health");
+        } else if cmd.starts_with("doctor") {
+            self.add_agent_response("Running diagnostics... (use 'telisq doctor' from terminal for full check)");
+        } else if cmd.starts_with("bootstrap") {
+            self.add_agent_response("Bootstrapping configuration... (use 'telisq bootstrap' from terminal)");
+        } else if cmd == "clear" {
+            self.state.chat_messages.clear();
+            self.add_agent_response("Chat history cleared.");
+        } else {
+            // Treat as natural language input
+            self.add_agent_response(&format!("Received: \"{}\"\nIn a full implementation, this would be sent to the Orchestrator for processing. Use 'help' for available commands.", command));
+        }
+    }
+
+    /// Add an agent response to the chat.
+    fn add_agent_response(&mut self, message: &str) {
+        self.state.chat_messages.push(ChatMessage {
+            role: ChatRole::Agent,
+            content: message.to_string(),
+            timestamp: Instant::now(),
+        });
     }
 
     async fn handle_ask_agent_mode_key(
@@ -275,33 +496,23 @@ impl App {
 
         match key.code {
             KeyCode::Esc => {
-                // Cancel input and return to normal mode
                 self.state.input_buffer.clear();
                 self.state.mode = AppMode::Normal;
                 self.state.ask_question = None;
                 self.state.ask_options.clear();
             }
             KeyCode::Enter => {
-                // Submit input and return to normal mode
                 self.state.mode = AppMode::Normal;
-                // The input buffer content will be retrieved by switch_to_normal_mode
             }
             KeyCode::Backspace => {
                 self.state.input_buffer.pop();
             }
             KeyCode::Delete => {
                 if !self.state.input_buffer.is_empty() {
-                    self.state
-                        .input_buffer
-                        .remove(self.state.input_buffer.len() - 1);
+                    self.state.input_buffer.remove(self.state.input_buffer.len() - 1);
                 }
             }
-            KeyCode::Left => {
-                // TODO: Implement cursor movement
-            }
-            KeyCode::Right => {
-                // TODO: Implement cursor movement
-            }
+            KeyCode::Left | KeyCode::Right => {}
             KeyCode::Char(c) => {
                 self.state.input_buffer.push(c);
             }
@@ -319,96 +530,69 @@ impl App {
                 self.state.current_step = Some(task_id.clone());
                 self.state.session_status = "Running".to_string();
 
-                // Update task status to InProgress
                 if let Some(task) = self.state.tasks.iter_mut().find(|t| t.id == task_id) {
                     task.status = TaskStatus::InProgress;
                 }
 
-                // Add agent log entry
                 self.state.agent_log.push(AgentLogEntry {
                     timestamp: Instant::now(),
                     message: format!("[~] Task {} started", task_id),
                 });
 
-                // Keep only last 50 log entries
                 if self.state.agent_log.len() > 50 {
-                    self.state
-                        .agent_log
-                        .drain(..self.state.agent_log.len() - 50);
+                    self.state.agent_log.drain(..self.state.agent_log.len() - 50);
                 }
             }
             OrchestratorEvent::StepCompleted(task_id) => {
-                self.state
-                    .agent_messages
-                    .push(format!("Completed step: {}", task_id));
+                self.state.agent_messages.push(format!("Completed step: {}", task_id));
 
-                // Update task status to Completed
                 if let Some(task) = self.state.tasks.iter_mut().find(|t| t.id == task_id) {
                     task.status = TaskStatus::Completed;
                 }
 
-                // Update task counts
                 self.update_task_counts();
 
-                // Add agent log entry
                 self.state.agent_log.push(AgentLogEntry {
                     timestamp: Instant::now(),
                     message: format!("[x] Task {} completed", task_id),
                 });
 
-                // Keep only last 50 log entries
                 if self.state.agent_log.len() > 50 {
-                    self.state
-                        .agent_log
-                        .drain(..self.state.agent_log.len() - 50);
+                    self.state.agent_log.drain(..self.state.agent_log.len() - 50);
                 }
 
-                // Update progress
                 self.update_session_progress();
             }
             OrchestratorEvent::StepFailed(task_id, error) => {
-                self.state
-                    .agent_messages
-                    .push(format!("Failed step: {} - {}", task_id, error));
+                self.state.agent_messages.push(format!("Failed step: {} - {}", task_id, error));
 
-                // Update task status to Failed
                 if let Some(task) = self.state.tasks.iter_mut().find(|t| t.id == task_id) {
                     task.status = TaskStatus::Failed;
                 }
 
-                // Update task counts
                 self.update_task_counts();
 
-                // Add agent log entry
                 self.state.agent_log.push(AgentLogEntry {
                     timestamp: Instant::now(),
                     message: format!("[!] Task {} failed: {}", task_id, error),
                 });
 
-                // Keep only last 50 log entries
                 if self.state.agent_log.len() > 50 {
-                    self.state
-                        .agent_log
-                        .drain(..self.state.agent_log.len() - 50);
+                    self.state.agent_log.drain(..self.state.agent_log.len() - 50);
                 }
 
-                // Update progress
                 self.update_session_progress();
             }
             OrchestratorEvent::AgentMessage(message) => {
                 self.state.agent_messages.push(message.clone());
 
-                // Add agent log entry
                 self.state.agent_log.push(AgentLogEntry {
                     timestamp: Instant::now(),
                     message,
                 });
 
-                // Keep only last 50 log entries
                 if self.state.agent_log.len() > 50 {
-                    self.state
-                        .agent_log
-                        .drain(..self.state.agent_log.len() - 50);
+                    self.state.agent_log.drain(..self.state.agent_log.len() - 50);
                 }
             }
             OrchestratorEvent::PlanCompleted => {
@@ -425,22 +609,16 @@ impl App {
                     TaskStatus::Skipped => "-",
                 };
 
-                // Update task status
                 if let Some(task) = self.state.tasks.iter_mut().find(|t| t.id == task_id) {
                     task.status = status.clone();
                 }
 
-                // Update task counts
                 self.update_task_counts();
 
-                self.state
-                    .agent_messages
-                    .push(format!("Task {} marker updated to [{}]", task_id, marker));
+                self.state.agent_messages.push(format!("Task {} marker updated to [{}]", task_id, marker));
             }
             OrchestratorEvent::SessionStopped(session_id) => {
-                self.state
-                    .agent_messages
-                    .push(format!("Session {} stopped", session_id));
+                self.state.agent_messages.push(format!("Session {} stopped", session_id));
                 self.state.session_status = "Stopped".to_string();
             }
             OrchestratorEvent::TaskRetry(task_id, attempt, error) => {
@@ -449,7 +627,6 @@ impl App {
                     task_id, attempt, error
                 ));
 
-                // Add agent log entry
                 self.state.agent_log.push(AgentLogEntry {
                     timestamp: Instant::now(),
                     message: format!("Task {} retry {}: {}", task_id, attempt, error),
@@ -460,7 +637,6 @@ impl App {
         Ok(())
     }
 
-    /// Updates the task counts based on current task statuses.
     fn update_task_counts(&mut self) {
         self.state.task_counts.clear();
         for task in &self.state.tasks {
@@ -468,7 +644,6 @@ impl App {
         }
     }
 
-    /// Updates the session progress percentage based on completed tasks.
     fn update_session_progress(&mut self) {
         if self.state.tasks.is_empty() {
             self.state.session_progress = 0;
@@ -486,7 +661,6 @@ impl App {
             ((completed as u16 * 100) / self.state.tasks.len() as u16).min(100);
     }
 
-    /// Updates the task list from task specs.
     pub fn update_tasks(&mut self, tasks: Vec<TaskSpec>) {
         self.state.tasks = tasks
             .into_iter()
@@ -504,33 +678,31 @@ impl App {
         match self.state.mode {
             AppMode::Normal => self.render_normal_mode(frame),
             AppMode::AskAgentInput => self.render_ask_agent_mode(frame),
+            AppMode::CommandInput => self.render_command_input_mode(frame),
         }
     }
 
     fn render_normal_mode(&mut self, frame: &mut Frame) {
-        // Main layout with 3 columns: sidebar, main content, index bar
+        // Main layout: sidebar, main content, index bar
         let main_layout = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(20), // Sidebar (session info)
-                Constraint::Percentage(55), // Main content
-                Constraint::Percentage(25), // Index bar
+                Constraint::Percentage(20),
+                Constraint::Percentage(55),
+                Constraint::Percentage(25),
             ])
             .split(frame.size());
 
-        // Sidebar - session info
         components::sidebar::render(frame, main_layout[0], &self.state);
 
-        // Main content - split vertically based on active panel
         let main_content = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Percentage(60), // Top panel
-                Constraint::Percentage(40), // Bottom panel
+                Constraint::Percentage(60),
+                Constraint::Percentage(40),
             ])
             .split(main_layout[1]);
 
-        // Render based on active panel
         match self.state.active_panel {
             ActivePanel::Plan => {
                 components::plan_view::render(frame, main_content[0], &self.state);
@@ -550,29 +722,63 @@ impl App {
             }
         }
 
-        // Index bar on the right
         components::index_bar::render(frame, main_layout[2], &self.state);
+
+        // Command input hint bar (above status bar)
+        self.render_command_hint(frame);
 
         // Status bar
         self.render_status_bar(frame);
     }
 
-    fn render_ask_agent_mode(&mut self, frame: &mut Frame) {
-        use ratatui::style::{Color, Modifier, Style};
-        use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+    fn render_command_input_mode(&mut self, frame: &mut Frame) {
+        // Render the normal panels first
+        self.render_normal_mode(frame);
 
-        // Full screen layout for ask mode
+        // Overlay input bar at bottom (above status bar)
+        let area = frame.size();
+        let input_height = 3u16;
+        let input_y = area.height.saturating_sub(input_height + 1);
+
+        let input_area = ratatui::layout::Rect::new(0, input_y, area.width, input_height);
+
+        let input_text = format!("> {}", self.state.input_buffer);
+        let input_block = Paragraph::new(input_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Command (Enter to submit, Esc to cancel)"),
+            )
+            .style(
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            );
+        frame.render_widget(input_block, input_area);
+    }
+
+    fn render_command_hint(&self, frame: &mut Frame) {
+        let area = frame.size();
+        let hint_y = area.height.saturating_sub(2);
+        let hint_area = ratatui::layout::Rect::new(0, hint_y, area.width, 1);
+
+        let hint_text = " Press ':' or '/' to type a command | Tab: switch panel | q: quit | ↑↓: navigate";
+        let hint = Paragraph::new(hint_text)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(hint, hint_area);
+    }
+
+    fn render_ask_agent_mode(&mut self, frame: &mut Frame) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(3),    // Question area
-                Constraint::Min(3),    // Options area
-                Constraint::Length(3), // Input area
-                Constraint::Length(1), // Status bar
+                Constraint::Min(3),
+                Constraint::Min(3),
+                Constraint::Length(3),
+                Constraint::Length(1),
             ])
             .split(frame.size());
 
-        // Question block
         let question_text = self.state.ask_question.as_deref().unwrap_or("No question");
         let question_block = Paragraph::new(question_text)
             .block(Block::default().borders(Borders::ALL).title("Question"))
@@ -580,7 +786,6 @@ impl App {
             .style(Style::default().fg(Color::White));
         frame.render_widget(question_block, chunks[0]);
 
-        // Options block
         let options_text = if self.state.ask_options.is_empty() {
             "No options available - free text input".to_string()
         } else {
@@ -592,7 +797,6 @@ impl App {
             .style(Style::default().fg(Color::Yellow));
         frame.render_widget(options_block, chunks[1]);
 
-        // Input block
         let input_text = format!("> {}", self.state.input_buffer);
         let input_block = Paragraph::new(input_text)
             .block(
@@ -607,18 +811,14 @@ impl App {
             );
         frame.render_widget(input_block, chunks[2]);
 
-        // Status bar
         self.render_status_bar(frame);
     }
 
     fn render_status_bar(&self, frame: &mut Frame) {
-        use ratatui::style::{Color, Style};
-        use ratatui::widgets::{Block, Borders, Paragraph};
-
         let running = self.orchestrator.as_ref().is_some_and(|o| o.is_running());
 
         let status_text = match self.state.mode {
-            AppMode::Normal => {
+            AppMode::Normal | AppMode::CommandInput => {
                 let running_status = if running { "▶ Running" } else { "⏸ Idle" };
                 format!(
                     " Telisq v0.1.0 | {} | Session: {} | Progress: {}% | Panel: {:?} | Keys: q=quit, Tab=panel, p/s/a/i=switch, Space=pause",

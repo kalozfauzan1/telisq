@@ -1,10 +1,17 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
+use mcp::registry::McpRegistry;
 use serde::{Deserialize, Serialize};
-use shared::config::AppConfig;
-use shared::types::{SessionId, SessionState};
+use shared::brief::AgentType;
+use shared::config::{AppConfig, LlmConfig};
+use shared::types::{SessionId, TaskSpec, SessionState};
 use std::path::PathBuf;
+use std::sync::Arc;
+use telisq_core::agents::plan_agent::{PlanAgent, PlanAgentConfig};
+use telisq_core::orchestrator::{Orchestrator, OrchestratorConfig, OrchestratorEvent};
 use telisq_core::session::store::SessionStore;
+use telisq_plan::parser::parse_plan_content;
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 #[derive(Parser)]
@@ -174,9 +181,114 @@ impl Session {
             println!("   Continue from: {}", task_id);
         }
 
-        // TODO: Wire to orchestrator for actual resume execution
-        println!("\n⚠️  Session resume wired - orchestrator execution not yet fully connected");
+        if dry_run {
+            println!("\n✅ Dry run complete - session details loaded");
+            return Ok(());
+        }
 
+        let plan_path = session.plan_path.clone();
+
+        let plan_content = std::fs::read_to_string(&plan_path)
+            .with_context(|| format!("Failed to read plan file: {}", plan_path.display()))?;
+        let tasks = parse_plan_content(&plan_content)
+            .with_context(|| format!("Failed to parse plan file: {}", plan_path.display()))?;
+
+        let mcp_registry = McpRegistry::new(config.mcp.servers.clone());
+        let failed_servers = mcp_registry.start_all().await;
+        if !failed_servers.is_empty() {
+            warn!(servers = ?failed_servers, "Some MCP servers failed to start");
+        }
+        let mcp_registry = Arc::new(mcp_registry);
+
+        let llm_config = Some(LlmConfig {
+            base_url: config.llm.base_url.clone(),
+            model: config.llm.model.clone(),
+            api_key: config.llm.api_key.clone(),
+            max_tokens: config.llm.max_tokens,
+            temperature: config.llm.temperature,
+        });
+
+        let session_store = SessionStore::new(&db_path)
+            .await
+            .context("Failed to initialize session store")?;
+
+        let orchestrator_config = OrchestratorConfig::default();
+
+        let mut orchestrator =
+            Orchestrator::with_llm(session_id.clone(), Some(orchestrator_config), llm_config);
+        orchestrator = orchestrator
+            .with_plan_path(plan_path.clone())
+            .with_session_store(session_store);
+
+        let task_count = tasks.len();
+        for task_spec in &tasks {
+            let task_id = task_spec.id.clone();
+
+            let plan_agent_config = PlanAgentConfig {
+                max_clarification_rounds: 3,
+                plans_dir: "plans".to_string(),
+                use_mcp_tools: true,
+                ambiguity_threshold: 0.8,
+                qdrant_top_k: 5,
+            };
+            let llm_cfg = LlmConfig {
+                base_url: config.llm.base_url.clone(),
+                model: config.llm.model.clone(),
+                api_key: config.llm.api_key.clone(),
+                max_tokens: config.llm.max_tokens,
+                temperature: config.llm.temperature,
+            };
+            let plan_agent = PlanAgent::with_llm(&task_id, Some(plan_agent_config), llm_cfg);
+
+            orchestrator.add_task(task_spec.clone(), Box::new(plan_agent), AgentType::Plan);
+        }
+
+        orchestrator.init_task_graph()?;
+
+        let resume_task_id = orchestrator.resume_from_store().await?;
+
+        let continue_from_task = continue_from
+            .clone()
+            .or_else(|| resume_task_id.clone());
+
+        if let Some(ref task_id) = continue_from_task {
+            info!(task_id = %task_id, "Resuming from task");
+            orchestrator = orchestrator.with_continue_from(task_id.clone());
+        }
+
+        let (event_tx, event_rx) = mpsc::channel::<OrchestratorEvent>(100);
+        orchestrator.set_event_tx(event_tx);
+
+        let mut app = crate::tui::app::App::new()?;
+        app.state.session_id = Some(session_id.to_string());
+
+        app.state.plan_nodes = (0..task_count)
+            .map(|i| format!("[ ] Task {}", i + 1))
+            .collect();
+
+        let task_specs: Vec<TaskSpec> = tasks.clone();
+        app.update_tasks(task_specs);
+
+        app.events.set_orchestrator_rx(event_rx);
+
+        tokio::spawn(async move {
+            info!("Starting orchestrator in background");
+            if let Err(e) = orchestrator.run().await {
+                error!(error = %e, "Orchestrator failed");
+            }
+            info!("Orchestrator finished");
+        });
+
+        let ctrl_c_session_id = session_id.clone();
+        tokio::spawn(async move {
+            tokio::signal::ctrl_c().await.ok();
+            info!(session_id = %ctrl_c_session_id, "Received Ctrl+C, persisting session");
+        });
+
+        info!("Starting TUI with resumed session");
+        app.run().await?;
+
+        info!("Session resume completed");
         Ok(())
     }
 
